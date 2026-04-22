@@ -36,6 +36,12 @@ static void build_history_filename(char *buffer) {
     sprintf(buffer, "%s_%d.txt", HISTORY_FILE_PREFIX, am_first_user ? 1 : 2);
 }
 
+static void show_chat_closed_screen(void) {
+    clear_terminal();
+    write_stdout("=== Welcome to Ghost Chat ===\n");
+    write_stdout("[SYSTEM] The chat was closed\n");
+}
+
 static void terminate_program(void) {
     if (receiver_process_id > 0) {
         kill(receiver_process_id, SIGTERM);
@@ -58,7 +64,7 @@ static void terminate_program(void) {
 
 static void handle_peer_exit(int sig) {
     (void)sig;
-    write_stdout("\n[SYSTEM] The other user has left the chat\n");
+    show_chat_closed_screen();
     terminate_program();
 }
 
@@ -253,6 +259,7 @@ static void process_outgoing_message(struct ChatMessage *outgoing_message, int b
         if (strncmp(outgoing_message->mtext, "EXIT", 4) == 0) {
             strcpy(outgoing_message->mtext, "SYS_EXIT");
             msgsnd(message_queue_id, outgoing_message, sizeof(outgoing_message->mtext), 0);
+            show_chat_closed_screen();
             terminate_program();
         }
 
