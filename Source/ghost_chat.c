@@ -9,7 +9,6 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 
-
 #define HISTORY_FILE_SUFFIX ".txt"
 #define SESSION_FILE "ghost_session"
 #define HISTORY_FILE_PREFIX "chat_history"
@@ -34,12 +33,10 @@
 #define COMMAND_EXIT "EXIT"
 #define COMMAND_SYS_EXIT "SYS_EXIT"
 
-
 struct ChatMessage {
     long mtype;
     char mtext[MAX_TEXT];
 };
-
 
 static int message_queue_id = -1;
 static int am_first_user = 0;
@@ -56,11 +53,17 @@ static void clear_terminal(void) {
 }
 
 static void build_history_filename(char *buffer) {
-    sprintf(buffer, "%s_%d%s", HISTORY_FILE_PREFIX, am_first_user ? 1 : 2, HISTORY_FILE_SUFFIX);
+    sprintf(buffer, "%s_%d%s",
+            HISTORY_FILE_PREFIX,
+            am_first_user ? 1 : 2,
+            HISTORY_FILE_SUFFIX);
 }
 
 static void build_temp_history_filename(char *buffer) {
-    sprintf(buffer, "%s_%d%s", HISTORY_FILE_PREFIX, am_first_user ? 1 : 2, TEMP_HISTORY_FILE_SUFFIX);
+    sprintf(buffer, "%s_%d%s",
+            HISTORY_FILE_PREFIX,
+            am_first_user ? 1 : 2,
+            TEMP_HISTORY_FILE_SUFFIX);
 }
 
 static void show_chat_closed_screen(void) {
@@ -78,6 +81,7 @@ static void terminate_program(void) {
 
     if (am_first_user) {
         unlink(SESSION_FILE);
+
         if (message_queue_id != -1) {
             msgctl(message_queue_id, IPC_RMID, NULL);
         }
@@ -88,6 +92,11 @@ static void terminate_program(void) {
     unlink(history_filename);
 
     exit(0);
+}
+
+static void handle_sigint(int sig) {
+    (void)sig;
+    terminate_program();
 }
 
 static void handle_peer_exit(int sig) {
@@ -165,9 +174,11 @@ static void redraw_history_after_removal(const char *line_to_remove) {
     if (input_fd != -1) {
         char buffer[1024];
         int bytes_read;
+
         while ((bytes_read = read(input_fd, buffer, sizeof(buffer))) > 0) {
             write(STDOUT_FD, buffer, bytes_read);
         }
+
         close(input_fd);
     }
 }
@@ -226,10 +237,18 @@ static int open_existing_session_and_connect(void) {
 
     char queue_id_text[32];
     int bytes_read = read(session_fd, queue_id_text, sizeof(queue_id_text) - 1);
+    if (bytes_read < 0) {
+        close(session_fd);
+        write_stdout(SYSTEM_PREFIX);
+        write_stdout(MSG_SESSION_OPEN_ERROR);
+        return -1;
+    }
+
     queue_id_text[bytes_read] = '\0';
     close(session_fd);
 
     message_queue_id = atoi(queue_id_text);
+
     write_stdout(SYSTEM_PREFIX);
     write_stdout(MSG_CONNECTED_TO_USER1);
 
@@ -248,7 +267,9 @@ static int initialize_session(void) {
 }
 
 static void process_received_message(struct ChatMessage *received_message) {
-    if (strncmp(received_message->mtext, COMMAND_SYS_EXIT, strlen(COMMAND_SYS_EXIT)) == 0) {
+    if (strncmp(received_message->mtext,
+                COMMAND_SYS_EXIT,
+                strlen(COMMAND_SYS_EXIT)) == 0) {
         kill(getppid(), SIGUSR1);
         exit(0);
     }
@@ -259,7 +280,9 @@ static void process_received_message(struct ChatMessage *received_message) {
 
     append_to_history(GHOST_PREFIX, received_message->mtext);
 
-    if (strncmp(received_message->mtext, COMMAND_BURN, strlen(COMMAND_BURN)) == 0) {
+    if (strncmp(received_message->mtext,
+                COMMAND_BURN,
+                strlen(COMMAND_BURN)) == 0) {
         schedule_burn_removal(GHOST_PREFIX, received_message->mtext);
     }
 }
@@ -286,18 +309,28 @@ static void process_outgoing_message(struct ChatMessage *outgoing_message, int b
             outgoing_message->mtext[bytes_read] = '\0';
         }
 
-        if (strncmp(outgoing_message->mtext, COMMAND_EXIT, strlen(COMMAND_EXIT)) == 0) {
+        if (strncmp(outgoing_message->mtext,
+                    COMMAND_EXIT,
+                    strlen(COMMAND_EXIT)) == 0) {
             strcpy(outgoing_message->mtext, COMMAND_SYS_EXIT);
-            msgsnd(message_queue_id, outgoing_message, sizeof(outgoing_message->mtext), 0);
+            msgsnd(message_queue_id,
+                   outgoing_message,
+                   sizeof(outgoing_message->mtext),
+                   0);
             show_chat_closed_screen();
             terminate_program();
         }
 
-        msgsnd(message_queue_id, outgoing_message, sizeof(outgoing_message->mtext), 0);
+        msgsnd(message_queue_id,
+               outgoing_message,
+               sizeof(outgoing_message->mtext),
+               0);
 
         append_to_history("", outgoing_message->mtext);
 
-        if (strncmp(outgoing_message->mtext, COMMAND_BURN, strlen(COMMAND_BURN)) == 0) {
+        if (strncmp(outgoing_message->mtext,
+                    COMMAND_BURN,
+                    strlen(COMMAND_BURN)) == 0) {
             schedule_burn_removal("", outgoing_message->mtext);
         }
     }
@@ -308,13 +341,15 @@ static void run_sender_loop(void) {
     outgoing_message.mtype = outgoing_type;
 
     while (1) {
-        int bytes_read = read(STDIN_FILENO, outgoing_message.mtext, MAX_TEXT - 1);
+        int bytes_read = read(STDIN_FILENO,
+                              outgoing_message.mtext,
+                              MAX_TEXT - 1);
         process_outgoing_message(&outgoing_message, bytes_read);
     }
 }
 
 int main(void) {
-    signal(SIGINT, terminate_program);
+    signal(SIGINT, handle_sigint);
     signal(SIGUSR1, handle_peer_exit);
 
     clear_terminal();
@@ -328,8 +363,12 @@ int main(void) {
 
     if (receiver_process_id == 0) {
         run_receiver_loop();
-    } else {
+    } else if (receiver_process_id > 0) {
         run_sender_loop();
+    } else {
+        write_stdout(SYSTEM_PREFIX);
+        write_stdout("Failed to create receiver process.\n");
+        terminate_program();
     }
 
     return 0;
