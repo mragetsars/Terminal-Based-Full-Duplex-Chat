@@ -23,11 +23,11 @@
 #define SYSTEM_PREFIX "[SYSTEM] "
 #define CHAT_HEADER "=== Welcome to Ghost Chat ===\n"
 
-#define MSG_OTHER_USER_LEFT "The chat was closed\n"
 #define MSG_CONNECTED_TO_USER1 "Connected to User 1's chat!\n"
 #define MSG_SESSION_OPEN_ERROR "Error opening session file.\n"
 #define MSG_WAITING_FOR_USER2 "Waiting for User 2 to join...\n"
-#define MSG_BURN_REMOVED "A BURN message just self-destructed!\n"
+#define MSG_OTHER_USER_LEFT "An EXIT message closed the chat.\n"
+#define MSG_BURN_REMOVED "A BURN message just self-destructed.\n"
 
 #define COMMAND_BURN "BURN"
 #define COMMAND_EXIT "EXIT"
