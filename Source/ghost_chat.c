@@ -75,30 +75,93 @@ void log_message(const char* prefix, const char* msg) {
     }
 }
 
-// پردازش پیام‌های BURN
-void handle_burn(char* msg_content) {
+// تابع جدید برای حذف پیام از فایل تاریخچه و بازنویسی ترمینال
+void remove_message_and_redraw(const char* target_line) {
+    char hist_filename[32];
+    char temp_filename[32];
+    sprintf(hist_filename, "%s_%d.txt", HIST_FILE, is_user_1 ? 1 : 2);
+    sprintf(temp_filename, "%s_%d_tmp.txt", HIST_FILE, is_user_1 ? 1 : 2);
+
+    // باز کردن فایل تاریخچه برای خواندن
+    int fd_in = open(hist_filename, O_RDONLY);
+    if (fd_in == -1) return;
+    
+    // باز کردن فایل موقت برای نوشتن
+    int fd_out = open(temp_filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd_out == -1) {
+        close(fd_in);
+        return;
+    }
+
+    char line[MAX_TEXT * 2];
+    int line_idx = 0;
+    char c;
+    int removed = 0; // فلگ برای اینکه فقط یک بار پیام پاک شود
+
+    // خواندن کاراکتر به کاراکتر با فراخوانی سیستمی (چون توابع کتابخانه‌ای مجاز نیستند)
+    while (read(fd_in, &c, 1) > 0) {
+        if (c == '\n' || line_idx == sizeof(line) - 1) {
+            line[line_idx] = '\0';
+            
+            // اگر خط فعلی همان پیام مد نظر بود و قبلاً پاکش نکرده بودیم، نادیده‌اش می‌گیریم
+            if (!removed && strcmp(line, target_line) == 0) {
+                removed = 1; 
+            } else {
+                // در غیر این صورت در فایل موقت می‌نویسیم
+                write(fd_out, line, strlen(line));
+                write(fd_out, "\n", 1);
+            }
+            line_idx = 0;
+        } else {
+            line[line_idx++] = c;
+        }
+    }
+    close(fd_in);
+    close(fd_out);
+
+    // جایگزینی فایل موقت با فایل اصلی با استفاده از فراخوانی‌های سیستمی مجاز
+    unlink(hist_filename);
+    link(temp_filename, hist_filename); // ساخت لینک جدید
+    unlink(temp_filename);              // حذف فایل موقت
+
+    // پاک کردن ترمینال
+    clear_screen();
+    print_str("=== Welcome to Ghost Chat ===\n");
+    
+    // چاپ مجدد تاریخچه
+    fd_in = open(hist_filename, O_RDONLY);
+    if (fd_in != -1) {
+        char buf[1024];
+        int n;
+        while ((n = read(fd_in, buf, sizeof(buf))) > 0) {
+            write(1, buf, n);
+        }
+        close(fd_in);
+    }
+}
+
+// تغییر در تابع هندل کردن پیام زمان‌دار
+void handle_burn(const char* prefix, char* msg_content) {
     char temp[MAX_TEXT];
     strcpy(temp, msg_content);
     
-    // پارس کردن ثانیه و متن (استفاده از توابع رشته مجاز)
+    // جدا کردن ثانیه
     strtok(temp, " "); // پرش از کلمه BURN
     char* sec_str = strtok(NULL, " ");
-    char* actual_msg = strtok(NULL, "");
-    
-    if (sec_str == NULL || actual_msg == NULL) return;
+    if (sec_str == NULL) return;
     
     int seconds = atoi(sec_str);
     
+    // ساختن دقیق خطی که در فایل تاریخچه ذخیره شده است
+    char target_line[MAX_TEXT * 2];
+    strcpy(target_line, prefix);
+    strcat(target_line, msg_content);
+    
     pid_t burn_pid = fork();
     if (burn_pid == 0) {
-        // پروسس فرزند برای شمارش معکوس مرگ پیام
+        // پروسس فرزند: صبر می‌کند و سپس فایل و صفحه را آپدیت می‌کند
         sleep(seconds);
-        
-        // در یک پیاده سازی کامل تر، در اینجا فایل تاریخچه باز شده، 
-        // خط مربوط به پیام حذف میشود و صفحه با clear_screen رفرش میشود.
-        // برای سادگی و جلوگیری از اختلال در نوشتن همزمان:
-        print_str("\n[SYSTEM] A BURN message just self-destructed!\n");
-        
+        remove_message_and_redraw(target_line);
         exit(0);
     }
 }
@@ -165,10 +228,12 @@ int main() {
                 
                 // بررسی پیام BURN
                 if (strncmp(rcv_msg.mtext, "BURN", 4) == 0) {
-                    print_str("Stranger (BURN): ");
+                    print_str("Stranger: ");
                     print_str(rcv_msg.mtext);
                     print_str("\n");
-                    handle_burn(rcv_msg.mtext);
+                    
+                    log_message("Stranger: ", rcv_msg.mtext);
+                    handle_burn("Stranger: ", rcv_msg.mtext); // صدا زدن نسخه جدید
                 } else {
                     print_str("Stranger: ");
                     print_str(rcv_msg.mtext);
@@ -176,6 +241,7 @@ int main() {
                 }
             }
         }
+        print_str("\n");
     } else {
         // *** پردازه والد: فرستنده پیام (Sender) ***
         struct msgbuf snd_msg;
@@ -184,7 +250,12 @@ int main() {
         while (1) {
             int n = read(0, snd_msg.mtext, MAX_TEXT - 1);
             if (n > 0) {
-                snd_msg.mtext[n] = '\0';
+                // حذف کاراکتر اینتر (\n) از انتهای ورودی برای تمیزی فایل لاگ
+                if (snd_msg.mtext[n-1] == '\n') {
+                    snd_msg.mtext[n-1] = '\0';
+                } else {
+                    snd_msg.mtext[n] = '\0';
+                }
                 
                 // هندل کردن دستور خروج
                 if (strncmp(snd_msg.mtext, "EXIT", 4) == 0) {
@@ -196,12 +267,14 @@ int main() {
                 msgsnd(msgid, &snd_msg, sizeof(snd_msg.mtext), 0);
                 
                 if (strncmp(snd_msg.mtext, "BURN", 4) == 0) {
-                    handle_burn(snd_msg.mtext);
+                    log_message("You: ", snd_msg.mtext);
+                    handle_burn("You: ", snd_msg.mtext); // صدا زدن نسخه جدید
                 } else {
                     log_message("You: ", snd_msg.mtext);
                 }
             }
         }
+        print_str("\n");
     }
 
     return 0;
