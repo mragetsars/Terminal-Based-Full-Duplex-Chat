@@ -7,256 +7,293 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <stdio.h>
 
 #define SESSION_FILE "ghost_session"
+#define HISTORY_FILE_PREFIX "chat_history"
 #define MAX_TEXT 1024
-#define HIST_FILE "chat_history"
 
-// ساختار پیام برای صف پیام
-struct msgbuf {
+struct ChatMessage {
     long mtype;
     char mtext[MAX_TEXT];
 };
 
-int msgid = -1;
-int is_user_1 = 0;
-long my_send_type, my_recv_type;
-pid_t receiver_pid = -1;
+static int message_queue_id = -1;
+static int am_first_user = 0;
+static long outgoing_type = 0;
+static long incoming_type = 0;
+static pid_t receiver_process_id = -1;
 
-// تابع کمکی برای چاپ روی ترمینال با write
-void print_str(const char *str) {
-    write(1, str, strlen(str));
+static void write_stdout(const char *text) {
+    write(STDOUT_FILENO, text, strlen(text));
 }
 
-// تابع برای پاک کردن صفحه ترمینال
-void clear_screen() {
-    write(1, "\033[H\033[J", 6);
+static void clear_terminal(void) {
+    write(STDOUT_FILENO, "\033[H\033[J", 6);
 }
 
-// تابع هندلر خروج برای پاکسازی منابع
-void cleanup_and_exit() {
-    if (receiver_pid > 0) {
-        kill(receiver_pid, SIGTERM);
-        waitpid(receiver_pid, NULL, 0);
+static void build_history_filename(char *buffer) {
+    sprintf(buffer, "%s_%d.txt", HISTORY_FILE_PREFIX, am_first_user ? 1 : 2);
+}
+
+static void terminate_program(void) {
+    if (receiver_process_id > 0) {
+        kill(receiver_process_id, SIGTERM);
+        waitpid(receiver_process_id, NULL, 0);
     }
-    
-    if (is_user_1) {
-        // حذف فایل سشن و صف پیام فقط توسط نفر اول
+
+    if (am_first_user) {
         unlink(SESSION_FILE);
-        if (msgid != -1) {
-            msgctl(msgid, IPC_RMID, NULL);
+        if (message_queue_id != -1) {
+            msgctl(message_queue_id, IPC_RMID, NULL);
         }
     }
-    
-    char hist_filename[32];
-    sprintf(hist_filename, "%s_%d.txt", HIST_FILE, is_user_1 ? 1 : 2);
-    unlink(hist_filename);
-    
+
+    char history_filename[32];
+    build_history_filename(history_filename);
+    unlink(history_filename);
+
     exit(0);
 }
 
-// هندلر سیگنال برای مواقعی که کاربر مقابل خارج میشود
-void handle_exit_signal(int sig) {
-    print_str("\n[SYSTEM] The other user has left the chat\n");
-    cleanup_and_exit();
+static void handle_peer_exit(int sig) {
+    (void)sig;
+    write_stdout("\n[SYSTEM] The other user has left the chat\n");
+    terminate_program();
 }
 
-// ذخیره پیام در تاریخچه محلی
-void log_message(const char* prefix, const char* msg) {
-    char hist_filename[32];
-    sprintf(hist_filename, "%s_%d.txt", HIST_FILE, is_user_1 ? 1 : 2);
-    
-    int fd = open(hist_filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
+static void append_to_history(const char *prefix, const char *message_text) {
+    char history_filename[32];
+    build_history_filename(history_filename);
+
+    int fd = open(history_filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
     if (fd != -1) {
         write(fd, prefix, strlen(prefix));
-        write(fd, msg, strlen(msg));
+        write(fd, message_text, strlen(message_text));
         write(fd, "\n", 1);
         close(fd);
     }
 }
 
-// تابع جدید برای حذف پیام از فایل تاریخچه و بازنویسی ترمینال
-void remove_message_and_redraw(const char* target_line) {
-    char hist_filename[32];
-    char temp_filename[32];
-    sprintf(hist_filename, "%s_%d.txt", HIST_FILE, is_user_1 ? 1 : 2);
-    sprintf(temp_filename, "%s_%d_tmp.txt", HIST_FILE, is_user_1 ? 1 : 2);
+static void redraw_history_after_removal(const char *line_to_remove) {
+    char history_filename[32];
+    char temporary_filename[32];
 
-    int fd_in = open(hist_filename, O_RDONLY);
-    if (fd_in == -1) return;
-    
-    int fd_out = open(temp_filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd_out == -1) {
-        close(fd_in);
+    sprintf(history_filename, "%s_%d.txt", HISTORY_FILE_PREFIX, am_first_user ? 1 : 2);
+    sprintf(temporary_filename, "%s_%d_tmp.txt", HISTORY_FILE_PREFIX, am_first_user ? 1 : 2);
+
+    int input_fd = open(history_filename, O_RDONLY);
+    if (input_fd == -1) {
         return;
     }
 
-    char line[MAX_TEXT * 2];
-    int line_idx = 0;
-    char c;
+    int output_fd = open(temporary_filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (output_fd == -1) {
+        close(input_fd);
+        return;
+    }
+
+    char line_buffer[MAX_TEXT * 2];
+    int line_length = 0;
+    char current_char;
     int removed = 0;
 
-    while (read(fd_in, &c, 1) > 0) {
-        if (c == '\n' || line_idx == sizeof(line) - 1) {
-            line[line_idx] = '\0';
-            if (!removed && strcmp(line, target_line) == 0) {
-                removed = 1; 
+    while (read(input_fd, &current_char, 1) > 0) {
+        if (current_char == '\n' || line_length == (int)sizeof(line_buffer) - 1) {
+            line_buffer[line_length] = '\0';
+
+            if (!removed && strcmp(line_buffer, line_to_remove) == 0) {
+                removed = 1;
             } else {
-                write(fd_out, line, strlen(line));
-                write(fd_out, "\n", 1);
+                write(output_fd, line_buffer, strlen(line_buffer));
+                write(output_fd, "\n", 1);
             }
-            line_idx = 0;
+
+            line_length = 0;
         } else {
-            line[line_idx++] = c;
+            line_buffer[line_length++] = current_char;
         }
     }
-    close(fd_in);
-    close(fd_out);
 
-    unlink(hist_filename);
-    link(temp_filename, hist_filename);
-    unlink(temp_filename);
+    close(input_fd);
+    close(output_fd);
 
-    clear_screen();
-    print_str("=== Welcome to Ghost Chat ===\n");
-    print_str("[SYSTEM] A BURN message just self-destructed!\n");
-    
-    fd_in = open(hist_filename, O_RDONLY);
-    if (fd_in != -1) {
-        char buf[1024];
-        int n;
-        while ((n = read(fd_in, buf, sizeof(buf))) > 0) {
-            write(1, buf, n);
+    unlink(history_filename);
+    link(temporary_filename, history_filename);
+    unlink(temporary_filename);
+
+    clear_terminal();
+    write_stdout("=== Welcome to Ghost Chat ===\n");
+    write_stdout("[SYSTEM] A BURN message just self-destructed!\n");
+
+    input_fd = open(history_filename, O_RDONLY);
+    if (input_fd != -1) {
+        char buffer[1024];
+        int bytes_read;
+        while ((bytes_read = read(input_fd, buffer, sizeof(buffer))) > 0) {
+            write(STDOUT_FILENO, buffer, bytes_read);
         }
-        close(fd_in);
+        close(input_fd);
     }
-    print_str("");
+
+    write_stdout("");
 }
 
-// تغییر در تابع هندل کردن پیام زمان‌دار
-void handle_burn(const char* prefix, char* msg_content) {
-    char temp[MAX_TEXT];
-    strcpy(temp, msg_content);
-    
-    strtok(temp, " ");
-    char* sec_str = strtok(NULL, " ");
-    if (sec_str == NULL) return;
-    
-    int seconds = atoi(sec_str);
-    
-    char target_line[MAX_TEXT * 2];
-    strcpy(target_line, prefix);
-    strcat(target_line, msg_content);
-    
-    pid_t burn_pid = fork();
-    if (burn_pid == 0) {
-        sleep(seconds);
-        remove_message_and_redraw(target_line);
+static void schedule_burn_removal(const char *prefix, char *message_text) {
+    char message_copy[MAX_TEXT];
+    strcpy(message_copy, message_text);
+
+    strtok(message_copy, " ");
+    char *seconds_text = strtok(NULL, " ");
+    if (seconds_text == NULL) {
+        return;
+    }
+
+    int burn_delay = atoi(seconds_text);
+
+    char full_history_line[MAX_TEXT * 2];
+    strcpy(full_history_line, prefix);
+    strcat(full_history_line, message_text);
+
+    pid_t burn_process_id = fork();
+    if (burn_process_id == 0) {
+        sleep(burn_delay);
+        redraw_history_after_removal(full_history_line);
         exit(0);
     }
 }
 
-int main() {
-    signal(SIGINT, cleanup_and_exit);
-    signal(SIGUSR1, handle_exit_signal);
+static void configure_as_first_user(int session_fd) {
+    am_first_user = 1;
+    outgoing_type = 1;
+    incoming_type = 2;
 
-    clear_screen();
-    print_str("=== Welcome to Ghost Chat ===\n");
+    message_queue_id = msgget(IPC_PRIVATE, 0666 | IPC_CREAT);
 
-    int fd = open(SESSION_FILE, O_CREAT | O_EXCL | O_RDWR, 0666);
-    
-    if (fd != -1) {
-        is_user_1 = 1;
-        my_send_type = 1;
-        my_recv_type = 2;
-        
-        msgid = msgget(IPC_PRIVATE, 0666 | IPC_CREAT);
-        
-        char id_str[32];
-        int len = sprintf(id_str, "%d", msgid);
-        write(fd, id_str, len);
-        close(fd);
-        
-        print_str("[SYSTEM] Waiting for User 2 to join...\n");
-    } else {
-        is_user_1 = 0;
-        my_send_type = 2;
-        my_recv_type = 1;
-        
-        fd = open(SESSION_FILE, O_RDONLY);
-        if (fd == -1) {
-            print_str("[SYSTEM] Error opening session file.\n");
-            return 1;
-        }
-        
-        char id_str[32];
-        int n = read(fd, id_str, sizeof(id_str) - 1);
-        id_str[n] = '\0';
-        close(fd);
-        
-        msgid = atoi(id_str);
-        print_str("[SYSTEM] Connected to User 1's chat!\n");
+    char queue_id_text[32];
+    int length = sprintf(queue_id_text, "%d", message_queue_id);
+    write(session_fd, queue_id_text, length);
+    close(session_fd);
+
+    write_stdout("[SYSTEM] Waiting for User 2 to join...\n");
+}
+
+static int open_existing_session_and_connect(void) {
+    am_first_user = 0;
+    outgoing_type = 2;
+    incoming_type = 1;
+
+    int session_fd = open(SESSION_FILE, O_RDONLY);
+    if (session_fd == -1) {
+        write_stdout("[SYSTEM] Error opening session file.\n");
+        return -1;
     }
 
-    receiver_pid = fork();
-    
-    if (receiver_pid == 0) {
-        // *** پردازه فرزند: دریافت کننده پیام (Receiver) ***
-        struct msgbuf rcv_msg;
-        while (1) {
-            if (msgrcv(msgid, &rcv_msg, sizeof(rcv_msg.mtext), my_recv_type, 0) != -1) {
-                if (strncmp(rcv_msg.mtext, "SYS_EXIT", 8) == 0) {
-                    kill(getppid(), SIGUSR1);
-                    exit(0);
-                }
-                
-                // بررسی پیام BURN
-                if (strncmp(rcv_msg.mtext, "BURN", 4) == 0) {
-                    print_str("[Ghost] ");
-                    print_str(rcv_msg.mtext);
-                    print_str("\n");
-                    
-                    log_message("[Ghost] ", rcv_msg.mtext);
-                    handle_burn("[Ghost] ", rcv_msg.mtext);
-                } else {
-                    print_str("[Ghost] ");
-                    print_str(rcv_msg.mtext);
-                    print_str("\n");
-                    log_message("[Ghost] ", rcv_msg.mtext);
-                }
-            }
+    char queue_id_text[32];
+    int bytes_read = read(session_fd, queue_id_text, sizeof(queue_id_text) - 1);
+    queue_id_text[bytes_read] = '\0';
+    close(session_fd);
+
+    message_queue_id = atoi(queue_id_text);
+    write_stdout("[SYSTEM] Connected to User 1's chat!\n");
+
+    return 0;
+}
+
+static int initialize_session(void) {
+    int session_fd = open(SESSION_FILE, O_CREAT | O_EXCL | O_RDWR, 0666);
+
+    if (session_fd != -1) {
+        configure_as_first_user(session_fd);
+        return 0;
+    }
+
+    return open_existing_session_and_connect();
+}
+
+static void process_received_message(struct ChatMessage *received_message) {
+    if (strncmp(received_message->mtext, "SYS_EXIT", 8) == 0) {
+        kill(getppid(), SIGUSR1);
+        exit(0);
+    }
+
+    write_stdout("[Ghost] ");
+    write_stdout(received_message->mtext);
+    write_stdout("\n");
+
+    append_to_history("[Ghost] ", received_message->mtext);
+
+    if (strncmp(received_message->mtext, "BURN", 4) == 0) {
+        schedule_burn_removal("[Ghost] ", received_message->mtext);
+    }
+}
+
+static void run_receiver_loop(void) {
+    struct ChatMessage received_message;
+
+    while (1) {
+        if (msgrcv(message_queue_id,
+                   &received_message,
+                   sizeof(received_message.mtext),
+                   incoming_type,
+                   0) != -1) {
+            process_received_message(&received_message);
         }
+    }
+}
+
+static void process_outgoing_message(struct ChatMessage *outgoing_message, int bytes_read) {
+    if (bytes_read > 0) {
+        if (outgoing_message->mtext[bytes_read - 1] == '\n') {
+            outgoing_message->mtext[bytes_read - 1] = '\0';
+        } else {
+            outgoing_message->mtext[bytes_read] = '\0';
+        }
+
+        if (strncmp(outgoing_message->mtext, "EXIT", 4) == 0) {
+            strcpy(outgoing_message->mtext, "SYS_EXIT");
+            msgsnd(message_queue_id, outgoing_message, sizeof(outgoing_message->mtext), 0);
+            terminate_program();
+        }
+
+        msgsnd(message_queue_id, outgoing_message, sizeof(outgoing_message->mtext), 0);
+
+        append_to_history("", outgoing_message->mtext);
+
+        if (strncmp(outgoing_message->mtext, "BURN", 4) == 0) {
+            schedule_burn_removal("", outgoing_message->mtext);
+        }
+    }
+}
+
+static void run_sender_loop(void) {
+    struct ChatMessage outgoing_message;
+    outgoing_message.mtype = outgoing_type;
+
+    while (1) {
+        write_stdout("");
+        int bytes_read = read(STDIN_FILENO, outgoing_message.mtext, MAX_TEXT - 1);
+        process_outgoing_message(&outgoing_message, bytes_read);
+    }
+}
+
+int main(void) {
+    signal(SIGINT, terminate_program);
+    signal(SIGUSR1, handle_peer_exit);
+
+    clear_terminal();
+    write_stdout("=== Welcome to Ghost Chat ===\n");
+
+    if (initialize_session() != 0) {
+        return 1;
+    }
+
+    receiver_process_id = fork();
+
+    if (receiver_process_id == 0) {
+        run_receiver_loop();
     } else {
-        // Sender
-        struct msgbuf snd_msg;
-        snd_msg.mtype = my_send_type;
-        
-        while (1) {
-            print_str("");
-            int n = read(0, snd_msg.mtext, MAX_TEXT - 1);
-            if (n > 0) {
-                if (snd_msg.mtext[n-1] == '\n') {
-                    snd_msg.mtext[n-1] = '\0';
-                } else {
-                    snd_msg.mtext[n] = '\0';
-                }
-                
-                if (strncmp(snd_msg.mtext, "EXIT", 4) == 0) {
-                    strcpy(snd_msg.mtext, "SYS_EXIT");
-                    msgsnd(msgid, &snd_msg, sizeof(snd_msg.mtext), 0);
-                    cleanup_and_exit();
-                }
-                
-                msgsnd(msgid, &snd_msg, sizeof(snd_msg.mtext), 0);
-                
-                if (strncmp(snd_msg.mtext, "BURN", 4) == 0) {
-                    log_message("", snd_msg.mtext);
-                    handle_burn("", snd_msg.mtext);
-                } else {
-                    log_message("", snd_msg.mtext);
-                }
-            }
-        }
+        run_sender_loop();
     }
 
     return 0;
