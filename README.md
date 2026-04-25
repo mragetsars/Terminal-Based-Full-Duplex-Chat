@@ -49,24 +49,48 @@ Typing the `EXIT` command triggers a structured cleanup routine. The program uti
 The project is organized as follows:
 
 ```text
-Ghost Chat/
+Terminal-Based Full-Duplex Chat/
+├── Builds/                # Object files generated during compilation
+│   └── ...
 ├── Description/           # Project specifications
 │   └── OS-CA1.pdf         # Assignment description
-├── Source/                # C Source Codes
-│   └── ghost_chat.c       # Main application logic
-├── README.md
+├── Includes/              # Header files
+│   ├── chat.h
+│   ├── common.h
+│   ├── history.h
+│   ├── session.h
+│   └── signals.h
+├── Source/                # Source code files
+│   ├── chat.c
+│   ├── history.c
+│   ├── main.c
+│   ├── session.c
+│   └── signals.c
+├── Makefile               # Build configuration
+├── ghost_chat             # Executable generated after build
+└── README.md              # Project documentation
 ```
 
-## 🛠️ Tools & Verification
+## 🚀 Setup & Verification
 
-  * **Language:** C
-  * **Target Environment:** Linux Operating System
-  * **Verification Strategy:**
-    1.  Compile using standard `gcc`.
-    2.  Open two separate terminal windows.
-    3.  Execute the binary in the first terminal (Acts as User 1).
-    4.  Execute the binary in the second terminal (Acts as User 2).
-    5.  Test concurrent messaging, BURN functionality, and safe closure.
+Built with **C** for **Linux** environments.
+
+**1. Install Dependencies**
+Ensure you have `gcc` and `make` installed. On Ubuntu:
+```bash
+sudo apt-get update && sudo apt-get install build-essential make
+```
+**2. Clone & Build**
+```bash
+git clone https://github.com/mragetsars/Terminal-Based-Full-Duplex-Chat.git
+cd Terminal-Based-Full-Duplex-Chat
+make clean && make
+```
+**3. Run & Verify**
+To test concurrent messaging, the BURN functionality, and safe closure, open **two separate terminal windows** and execute the binary in each (acting as User 1 and User 2):
+```bash
+./ghost_chat.out
+```
 
 ## 👤 Author
 
